@@ -1,11 +1,21 @@
 services:
-  precheck:
+  app:
     build: .
     image: link-cost-precheck:latest
     container_name: link-cost-precheck
     ports:
       - "8000:8000"
     restart: unless-stopped
+    environment:
+      # 启动配置：拓扑 + 链路代价 + 业务清单
+      TOPOLOGY_CONFIG_PATH: /srv/examples/report_demo.json
+      # 演示用：v2 等待 4 秒、v4 等待 3 秒再算完，便于在 /docs 观察
+      # “重算期间仍返回旧报告”和“两版乱序算完后只认高版次”。
+      # 不需要时改为 {} 或注释掉即可。
+      REPORT_COMPUTE_DELAYS: '{"2": 4, "4": 3}'
+    volumes:
+      # 只挂载配置目录，修改示例配置后重启容器即可生效
+      - ./examples:/srv/examples:ro
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2).status==200 else 1)"]
       interval: 10s

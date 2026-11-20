@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
-from pydantic import BaseModel, Field, model_validator
+from datetime import datetime
+from typing import Literal
+
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 MAX_BATCH_SIZE = 50
 
@@ -109,3 +112,205 @@ class PrecheckResponse(BaseModel):
             ]
         }
     }
+
+
+# ======================================================================
+# 现行转发路径合规核查
+# ======================================================================
+
+
+class BusinessSpec(BaseModel):
+    """一项业务：起终点、必须依序经过的设备、必须避开的设备。"""
+
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+    id: str = Field(..., min_length=1, description="业务唯一标识")
+    source: str = Field(..., min_length=1, description="起点设备")
+    target: str = Field(..., min_length=1, description="终点设备")
+    must_pass: list[str] = Field(
+        default_factory=list,
+        description="必须按出现顺序依次经过的设备；提前路过不算数，之后须再次经过",
+    )
+    must_avoid: list[str] = Field(default_factory=list, description="必须避开的设备")
+
+    @model_validator(mode="after")
+    def _validate(self) -> "BusinessSpec":
+        if self.source == self.target:
+            raise ValueError(f"业务 {self.id} 的起点与终点不能相同")
+        for name in self.must_pass:
+            if not name:
+                raise ValueError(f"业务 {self.id} 的必经设备标识不能为空")
+        for name in self.must_avoid:
+            if not name:
+                raise ValueError(f"业务 {self.id} 的避开设备标识不能为空")
+        if len(set(self.must_pass)) != len(self.must_pass):
+            raise ValueError(f"业务 {self.id} 的必经设备列表存在重复")
+        if len(set(self.must_avoid)) != len(self.must_avoid):
+            raise ValueError(f"业务 {self.id} 的避开设备列表存在重复")
+        overlap = sorted(set(self.must_pass) & set(self.must_avoid))
+        if overlap:
+            raise ValueError(f"业务 {self.id} 的同一设备不能既必经又避开：{overlap}")
+        if self.source in self.must_avoid or self.target in self.must_avoid:
+            raise ValueError(f"业务 {self.id} 的起点/终点不能在避开列表中")
+        if self.source in self.must_pass:
+            raise ValueError(f"业务 {self.id} 的起点不能同时出现在必经列表中")
+        if self.target in self.must_pass:
+            raise ValueError(f"业务 {self.id} 的终点不能同时出现在必经列表中")
+        return self
+
+
+class ReportRequest(BaseModel):
+    """每次上报：监控侧单调递增版次 + 当次全部停用链路。"""
+
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+    revision: int = Field(..., ge=1, description="监控侧递增版次（正整数）")
+    disabled_links: list[list[str]] = Field(
+        default_factory=list,
+        description='本次全部停用链路，每项为 ["设备A", "设备B"]（无向，顺序不限）',
+    )
+
+    @model_validator(mode="after")
+    def _validate(self) -> "ReportRequest":
+        seen: set[frozenset[str]] = set()
+        for i, link in enumerate(self.disabled_links, start=1):
+            if len(link) != 2:
+                raise ValueError(f"第 {i} 项停用链路必须恰好包含两个端点")
+            a, b = link
+            if not a or not b:
+                raise ValueError(f"第 {i} 项停用链路端点不能为空")
+            if a == b:
+                raise ValueError(f"第 {i} 项停用链路不能是自环：{a}")
+            key = frozenset((a, b))
+            if key in seen:
+                raise ValueError(f"停用链路 {a} <-> {b} 重复")
+            seen.add(key)
+        return self
+
+
+class BusinessCheck(BaseModel):
+    """单项业务的核查结论。"""
+
+    id: str
+    source: str
+    target: str
+    status: Literal["ok", "unreachable", "violating"] = Field(
+        ...,
+        description="ok=存在合规最短路径；unreachable=剩余拓扑上不可达；"
+        "violating=可达但全部最短路径都违规",
+    )
+    path: list[str] = Field(
+        default_factory=list,
+        description="status=ok 时为一条合规最短路径；status=violating 时为一条违规最短路径；"
+        "unreachable 时为空",
+    )
+    cost: int | None = Field(None, description="路径总代价；unreachable 时为 null")
+    avoided_devices: list[str] = Field(
+        default_factory=list, description="违规最短路径上踩中的避开设备"
+    )
+    missed_must_pass: list[str] = Field(
+        default_factory=list, description="违规最短路径上未按序经过的必经设备"
+    )
+    detail: str = Field(..., description="人类可读的结论说明")
+
+
+class ReportSnapshot(BaseModel):
+    """已生效的整份报告（查询返回的就是这个结构）。"""
+
+    revision: int
+    generated_at: datetime
+    disabled_links: list[list[str]] = Field(..., description="生成该报告时使用的全部停用链路")
+    topology_nodes: int
+    topology_links: int
+    summary: dict[str, int] = Field(
+        ..., description="各状态计数：ok / unreachable / violating"
+    )
+    businesses: list[BusinessCheck]
+
+
+class ReportStatus(BaseModel):
+    """当前报告与重算状态。"""
+
+    revision: int
+    generated_at: datetime
+    summary: dict[str, int]
+    computing: bool = Field(..., description="是否正在重算")
+    computing_revisions: list[int] = Field(
+        default_factory=list, description="正在重算的版次（可能有多版乱序完成）"
+    )
+    last_rejected: int | None = Field(
+        None, description="最近一次算完但被拒收的版次：成功但版次不高于现行报告"
+    )
+    last_failed: int | None = Field(None, description="最近一次计算失败的版次")
+
+
+class ReportRequestAccepted(BaseModel):
+    revision: int
+    accepted: bool
+    active_revision: int
+    message: str
+
+
+class ReportResponse(BaseModel):
+    """查询结果：整份报告 + 对应版次；无现行报告时 report 为 null。"""
+
+    active_revision: int | None
+    report: ReportSnapshot | None
+    status: ReportStatus | None
+
+
+# ======================================================================
+# 启动配置
+# ======================================================================
+
+
+class ConfigLink(BaseModel):
+    """启动时配置的双向链路，代价固定。"""
+
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+    a: str = Field(..., min_length=1)
+    b: str = Field(..., min_length=1)
+    cost: int = Field(..., ge=1)
+
+    @model_validator(mode="after")
+    def _validate(self) -> "ConfigLink":
+        if self.a == self.b:
+            raise ValueError(f"不允许自环链路：{self.a}")
+        return self
+
+
+class TopologyConfig(BaseModel):
+    """启动时加载的一套拓扑 + 业务清单。"""
+
+    links: list[ConfigLink] = Field(..., min_length=1)
+    businesses: list[BusinessSpec] = Field(..., min_length=1)
+
+    @model_validator(mode="after")
+    def _validate(self) -> "TopologyConfig":
+        seen_links: set[frozenset[str]] = set()
+        nodes: set[str] = set()
+        for lk in self.links:
+            key = frozenset((lk.a, lk.b))
+            if key in seen_links:
+                raise ValueError(f"链路 {lk.a} <-> {lk.b} 重复定义")
+            seen_links.add(key)
+            nodes.add(lk.a)
+            nodes.add(lk.b)
+
+        seen_ids: set[str] = set()
+        for biz in self.businesses:
+            if biz.id in seen_ids:
+                raise ValueError(f"业务标识 {biz.id} 重复")
+            seen_ids.add(biz.id)
+            referenced = {biz.source, biz.target, *biz.must_pass, *biz.must_avoid}
+            missing = sorted(referenced - nodes)
+            if missing:
+                raise ValueError(f"业务 {biz.id} 引用了拓扑中不存在的设备：{missing}")
+        return self
+
+    @property
+    def nodes(self) -> set[str]:
+        return {lk.a for lk in self.links} | {lk.b for lk in self.links}
+
+

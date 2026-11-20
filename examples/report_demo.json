@@ -1,0 +1,42 @@
+{
+  "links": [
+    {"a": "HQ", "b": "CORE1", "cost": 2},
+    {"a": "HQ", "b": "CORE2", "cost": 3},
+    {"a": "CORE1", "b": "CORE2", "cost": 1},
+    {"a": "CORE1", "b": "PE1", "cost": 2},
+    {"a": "CORE2", "b": "PE2", "cost": 2},
+    {"a": "PE1", "b": "ACCESS", "cost": 3},
+    {"a": "PE2", "b": "ACCESS", "cost": 3},
+    {"a": "PE1", "b": "PE2", "cost": 4},
+    {"a": "CORE1", "b": "EDGE", "cost": 5}
+  ],
+  "businesses": [
+    {
+      "id": "biz-crm",
+      "source": "HQ",
+      "target": "ACCESS",
+      "must_pass": ["CORE1"],
+      "must_avoid": ["PE2"]
+    },
+    {
+      "id": "biz-iot",
+      "source": "ACCESS",
+      "target": "HQ",
+      "must_pass": [],
+      "must_avoid": ["PE2"]
+    },
+    {
+      "id": "biz-video",
+      "source": "HQ",
+      "target": "PE2",
+      "must_pass": ["CORE1"],
+      "must_avoid": ["PE1"]
+    },
+    {
+      "id": "biz-edge",
+      "source": "EDGE",
+      "target": "ACCESS",
+      "must_pass": ["CORE1"]
+    }
+  ]
+}
